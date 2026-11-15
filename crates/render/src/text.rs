@@ -164,26 +164,35 @@ fn invisible(c: char) -> bool {
         || matches!(c, '\u{AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{E0100}'..='\u{E01EF}')
 }
 
-/// An installed CJK face for `region`, parsed once; `None` when there is none (or on the web).
+/// A CJK face for `region`, parsed once: an installed one, else the one the web app downloaded
+/// (`None` until it has). An installed face is looked for once; a downloaded one once it's there.
 fn cjk(region: CjkRegion) -> Option<&'static FontRef<'static>> {
     static FACES: [OnceLock<Option<FontRef<'static>>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static DOWNLOADED: [OnceLock<Option<FontRef<'static>>>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     let slot = match region {
-        CjkRegion::SimplifiedChinese => &FACES[0],
-        CjkRegion::Japanese => &FACES[1],
-        CjkRegion::Korean => &FACES[2],
-        CjkRegion::TraditionalChinese => &FACES[3],
+        CjkRegion::SimplifiedChinese => 0,
+        CjkRegion::Japanese => 1,
+        CjkRegion::Korean => 2,
+        CjkRegion::TraditionalChinese => 3,
     };
-    slot.get_or_init(|| crate::fonts::cjk_font(region).and_then(|(b, i)| FontRef::try_from_slice_and_index(b, *i).ok())).as_ref()
+    let parse = |(b, i): &'static (Vec<u8>, u32)| FontRef::try_from_slice_and_index(b, *i).ok();
+    let installed = FACES.get(slot)?.get_or_init(|| crate::fonts::cjk_font(region).and_then(parse)).as_ref();
+    installed.or_else(|| {
+        let downloaded = crate::fonts::downloaded_cjk_font(region)?;
+        DOWNLOADED.get(slot)?.get_or_init(|| parse(downloaded)).as_ref()
+    })
 }
 
 /// The CJK faces to try for `c`, the region whose glyph style suits it first: Hangul looks for a
 /// Korean face, kana for a Japanese one, everything else (Han ideographs) for Simplified Chinese.
-fn cjk_order(c: char) -> [CjkRegion; 3] {
-    use CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc};
+/// Traditional Chinese comes after Simplified: where Simplified is installed nothing changes, and
+/// in the browser it is the face a Traditional Chinese interface downloads.
+fn cjk_order(c: char) -> [CjkRegion; 4] {
+    use CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc, TraditionalChinese as Tc};
     match c {
-        '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => [Kr, Sc, Jp],
-        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => [Jp, Sc, Kr],
-        _ => [Sc, Jp, Kr],
+        '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => [Kr, Sc, Tc, Jp],
+        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => [Jp, Sc, Tc, Kr],
+        _ => [Sc, Tc, Jp, Kr],
     }
 }
 
@@ -259,8 +268,11 @@ pub fn line_count(text: &str) -> usize {
 /// Repeated measurements share a bounded retention cache; fonts are discovered once per process.
 /// Long strings and non-finite sizes keep the uncached behavior, including its glyph limit.
 pub fn measure(text: &str, size: f32, bold: bool) -> f32 {
-    static WIDTHS: OnceLock<widths::Cache> = OnceLock::new();
-    WIDTHS.get_or_init(widths::Cache::default).measure(text, size, bold, || measure_uncached(text, size, bold))
+    // Keyed by the faces handed over at run time too: a width measured before a downloaded CJK
+    // face arrived left its characters out.
+    static WIDTHS: OnceLock<widths::Cache<(bool, u32)>> = OnceLock::new();
+    let key = (bold, crate::fonts::fonts_added());
+    WIDTHS.get_or_init(widths::Cache::default).measure(text, size, key, || measure_uncached(text, size, bold))
 }
 
 /// The original measurement, including em scaling, font fallbacks and the missing-font estimate.
@@ -279,8 +291,8 @@ pub fn measure_in(text: &str, size: f32, face: Face) -> f32 {
     }
     // Labels in a named family are measured as often as those in the label font (every feature,
     // every frame), so they share its retention, keyed by the whole face.
-    static WIDTHS: OnceLock<widths::Cache<(bool, bool, bool, Option<u16>)>> = OnceLock::new();
-    let key = (face.bold, face.italic, face.serif, face.family);
+    static WIDTHS: OnceLock<widths::Cache<(bool, bool, bool, Option<u16>, u32)>> = OnceLock::new();
+    let key = (face.bold, face.italic, face.serif, face.family, crate::fonts::fonts_added());
     WIDTHS.get_or_init(widths::Cache::default).measure(text, size, key, || {
         let Some((f, _)) = face_font(face) else {
             return text.chars().count() as f32 * size * 0.6;
@@ -1260,6 +1272,31 @@ mod coverage_tests {
             super::text_at(c, &ch.to_string(), 40.0, 20.0, 24.0, rustgis_map::Rgba::rgb(0, 0, 0), false, super::Align::Center, false)
         });
         assert!(pm.pixels().iter().any(|p| p.alpha() > 0), "the fallback glyph was not drawn");
+    }
+
+    /// In the browser no CJK font is installed: the face the web app downloads draws what the
+    /// label font lacks, in exports and the layout view, and widths measured before it arrived are
+    /// measured again. egui's icon face stands in for a downloaded one: it has only a few
+    /// private-use characters, so the other tests draw as before.
+    #[test]
+    fn draws_with_a_downloaded_face_where_none_is_installed() {
+        use crate::fonts::{CjkRegion, add_downloaded_cjk_font, cjk_font};
+        let icon = "\u{E618}";
+        let installed =
+            [CjkRegion::SimplifiedChinese, CjkRegion::TraditionalChinese, CjkRegion::Japanese].into_iter().any(|r| cjk_font(r).is_some());
+        // An installed face is tried first; a label font with the character needs no other.
+        if installed || super::covers(icon, false) {
+            return;
+        }
+        let before = super::measure(icon, 10.0, false);
+        assert!(add_downloaded_cjk_font(CjkRegion::Japanese, epaint_default_fonts::EGUI_ICONS.to_vec()));
+        assert!(super::covers(icon, false));
+        assert!(super::measure(icon, 10.0, false) > before, "a width cached before the face arrived was kept");
+        let mut pm = tiny_skia::Pixmap::new(80, 40).unwrap();
+        crate::canvas::with_canvas(&mut pm, |c| {
+            super::text_at(c, icon, 40.0, 20.0, 24.0, rustgis_map::Rgba::rgb(0, 0, 0), false, super::Align::Center, false)
+        });
+        assert!(pm.pixels().iter().any(|p| p.alpha() > 0), "the downloaded face's glyph was not drawn");
     }
 
     /// A text asking for a serif (#517) where none is installed is drawn in the label font, slanted

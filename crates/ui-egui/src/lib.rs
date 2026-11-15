@@ -6027,6 +6027,11 @@ impl RustGisApp {
                 }
                 continue;
             }
+            // The renderer (exported images and PDFs, the layout view) has no installed CJK
+            // font in the browser either: it draws CJK text with this face too.
+            if let Some(ScriptFont::Cjk(r)) = region {
+                rustgis_engine::render::fonts::add_downloaded_cjk_font(r, bytes.clone());
+            }
             let name = format!("web-{}", url.rsplit('/').next().unwrap_or("font"));
             self.extra_fonts.retain(|(n, _, _)| *n != name);
             self.extra_fonts.push((name, std::sync::Arc::new(egui::FontData::from_owned(bytes)), region));
