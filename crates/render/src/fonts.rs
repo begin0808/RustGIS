@@ -445,7 +445,7 @@ pub fn add_downloaded_cjk_font(region: CjkRegion, bytes: Vec<u8>) -> Result<&'st
     if let Some(bytes) = offered {
         return Err(bytes);
     }
-    FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(&kept.0)
 }
 
@@ -456,7 +456,7 @@ pub fn downloaded_cjk_font(region: CjkRegion) -> Option<&'static (Vec<u8>, u32)>
 
 /// How many faces have been handed over at run time: a key part for cached text widths.
 pub fn fonts_added() -> u32 {
-    FONTS_ADDED.load(std::sync::atomic::Ordering::Relaxed)
+    FONTS_ADDED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Whether `bytes` hold a font with face `index` that the font parser accepts. Fonts handed to the
