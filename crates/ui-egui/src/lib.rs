@@ -1825,6 +1825,51 @@ impl RustGisApp {
         }
     }
 
+    /// In the browser, downloads a CJK face for the CJK text the renderer met with none to draw it
+    /// in (map labels, a layout's text, an export), whatever the interface language: the browser
+    /// has no installed fonts, and the interface downloads one only for its own language. Once the
+    /// face arrives, the map and the layout page are drawn again with it, and the interface draws
+    /// that text with it too.
+    fn ensure_data_cjk_font(&mut self) {
+        use rustgis_engine::render::fonts::{ScriptFont, script_font_url, take_missing_cjk};
+        let missing = take_missing_cjk();
+        if missing.is_empty() || self.services.fetch_font.is_none() {
+            return;
+        }
+        let name = |r| format!("script-{:?}", ScriptFont::Cjk(r));
+        let asked = |r| {
+            let n = name(r);
+            self.fonts_requested.contains(&n)
+                || self.fonts_failed.contains(&n)
+                || self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(r)))
+        };
+        let wanted = cjk_downloads(&missing, self.han_region(), asked);
+        for region in wanted {
+            self.fonts_requested.push(name(region));
+            if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(ScriptFont::Cjk(region))) {
+                fetch(url);
+            }
+        }
+    }
+
+    /// The face ideographs in data are downloaded in: the interface's own CJK region, else that of
+    /// the first CJK language among the system's (the browser's) preferred ones, so a Taiwanese
+    /// browser gets Traditional Chinese forms, else Simplified Chinese, the renderer's first choice.
+    fn han_region(&self) -> rustgis_engine::render::fonts::CjkRegion {
+        use rustgis_engine::render::fonts::{CjkRegion, ScriptFont};
+        let cjk = |s: Option<ScriptFont>| match s {
+            Some(ScriptFont::Cjk(r)) => Some(r),
+            _ => None,
+        };
+        cjk(self.current_region())
+            .or_else(|| {
+                sys_locale::get_locales()
+                    .take(16)
+                    .find_map(|tag| cjk(i18n::lang_from_tag(&tag).and_then(|l| Self::script_region(l.script()))))
+            })
+            .unwrap_or(CjkRegion::SimplifiedChinese)
+    }
+
     /// Adds the waiting picture graphic with its image (`path` or base64 `image`).
     fn add_picture(&mut self, mut p: Value) -> Result<Value, String> {
         let pts = self.ui.pending_picture.take().ok_or("drag the picture's rectangle on the map first")?;
@@ -6037,6 +6082,7 @@ impl RustGisApp {
         #[cfg(not(target_arch = "wasm32"))]
         syncmark::tick(self);
         self.ensure_script_font();
+        self.ensure_data_cjk_font();
         // Fonts downloaded by the web app.
         let fonts: Vec<(String, Vec<u8>)> = match &self.services.font_inbox {
             Some(inbox) => std::mem::take(&mut *inbox.lock().unwrap_or_else(|e| e.into_inner())),
@@ -6087,6 +6133,12 @@ impl RustGisApp {
         if self.fonts_dirty {
             self.fonts_dirty = false;
             self.installed_region = self.current_region();
+            // Ideographs in exports and the layout view take the interface's regional forms when
+            // its face was downloaded, though another region's was downloaded before.
+            rustgis_engine::render::fonts::prefer_downloaded_cjk(match self.installed_region {
+                Some(rustgis_engine::render::fonts::ScriptFont::Cjk(r)) => Some(r),
+                _ => None,
+            });
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
             self.map.invalidate();
@@ -6358,6 +6410,49 @@ fn project_file_name(url: &str) -> Option<&str> {
 /// still read as two.
 fn double_click_delay(dt: f32) -> f64 {
     (0.3 + 2.0 * f64::from(dt)).clamp(0.5, 1.2)
+}
+
+/// The CJK faces to download for the scripts the renderer had no face for: a Korean face for
+/// Hangul, a Japanese one for kana, `han`'s for ideographs. A region already downloaded, asked
+/// for or failed (`asked`) isn't asked for again, nor twice.
+fn cjk_downloads(
+    missing: &[rustgis_engine::render::fonts::CjkScript],
+    han: rustgis_engine::render::fonts::CjkRegion,
+    asked: impl Fn(rustgis_engine::render::fonts::CjkRegion) -> bool,
+) -> Vec<rustgis_engine::render::fonts::CjkRegion> {
+    use rustgis_engine::render::fonts::{CjkRegion, CjkScript};
+    let mut wanted = Vec::new();
+    for script in missing {
+        let region = match script {
+            CjkScript::Han => han,
+            CjkScript::Kana => CjkRegion::Japanese,
+            CjkScript::Hangul => CjkRegion::Korean,
+        };
+        if !asked(region) && !wanted.contains(&region) {
+            wanted.push(region);
+        }
+    }
+    wanted
+}
+
+#[cfg(test)]
+mod cjk_download_tests {
+    use rustgis_engine::render::fonts::{CjkRegion, CjkScript};
+
+    /// Each script missing asks for its region's face once; ideographs for the region given, and
+    /// nothing for a region already downloaded, asked for or failed.
+    #[test]
+    fn missing_scripts_ask_for_their_regions_once() {
+        use CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc, TraditionalChinese as Tc};
+        let none = |_| false;
+        assert_eq!(super::cjk_downloads(&[], Tc, none), vec![]);
+        assert_eq!(super::cjk_downloads(&[CjkScript::Han], Tc, none), vec![Tc]);
+        assert_eq!(super::cjk_downloads(&[CjkScript::Han], Sc, none), vec![Sc]);
+        assert_eq!(super::cjk_downloads(&[CjkScript::Han, CjkScript::Kana, CjkScript::Hangul], Tc, none), vec![Tc, Jp, Kr]);
+        // Japanese ideographs and kana need one face.
+        assert_eq!(super::cjk_downloads(&[CjkScript::Han, CjkScript::Kana], Jp, none), vec![Jp]);
+        assert_eq!(super::cjk_downloads(&[CjkScript::Han, CjkScript::Hangul], Tc, |r| r == Tc), vec![Kr]);
+    }
 }
 
 /// A test's click whose press and release arrive in one frame, as they do inside a slow one, `gap`
