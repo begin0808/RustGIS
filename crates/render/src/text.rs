@@ -427,12 +427,14 @@ fn spaced_line_width(line: &str, size: f32, face: Face, spacing: f32, ppp: f32) 
 
 /// How many glyphs a line is drawn with in `face` (letter spacing goes between them): shaped once
 /// for each line and face, as a size doesn't change it, and kept while the lines kept are few.
+/// Keyed by the faces handed over at run time too: a line shaped before a downloaded CJK face
+/// arrived left its characters out.
 fn letters_of(line: &str, face: Face) -> usize {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    static KEPT: OnceLock<Mutex<HashMap<(String, Face), usize>>> = OnceLock::new();
+    static KEPT: OnceLock<Mutex<HashMap<(String, Face, u32), usize>>> = OnceLock::new();
     let kept = KEPT.get_or_init(Mutex::default);
-    let key = (line.to_string(), face);
+    let key = (line.to_string(), face, crate::fonts::fonts_added());
     if let Some(n) = kept.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return *n;
     }
@@ -1314,6 +1316,7 @@ mod coverage_tests {
         let icon = "\u{E618}";
         assert!(!super::covers(icon, false), "the built-in label font has no icons");
         let (before, added) = (super::measure(icon, 10.0, false), fonts_added());
+        let letters = super::letters_of("\u{E618}\u{E618}", super::Face::default());
         assert!(add_downloaded_cjk_font(CjkRegion::Japanese, b"not a font".to_vec()).is_err());
         assert!(downloaded_cjk_font(CjkRegion::Japanese).is_none());
         assert_eq!(add_downloaded_cjk_font(CjkRegion::Japanese, EGUI_ICONS.to_vec()), Ok(EGUI_ICONS), "the kept bytes are shared");
@@ -1321,6 +1324,8 @@ mod coverage_tests {
         assert_eq!(add_downloaded_cjk_font(CjkRegion::Japanese, HACK_REGULAR.to_vec()), Err(HACK_REGULAR.to_vec()), "one face a region");
         assert_eq!(fonts_added(), added + 1);
         assert!(super::covers(icon, false));
+        let spaced = super::letters_of("\u{E618}\u{E618}", super::Face::default());
+        assert!(spaced > letters, "a letter count shaped before the face arrived was kept: {letters} then {spaced}");
         assert!(super::measure(icon, 10.0, false) > before, "a width cached before the face arrived was kept");
         let mut pm = tiny_skia::Pixmap::new(80, 40).unwrap();
         crate::canvas::with_canvas(&mut pm, |c| {
