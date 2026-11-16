@@ -1913,6 +1913,24 @@ impl RustGisApp {
         }
     }
 
+    /// Asks again for the CJK faces the map's text asked for that failed to download: picking a
+    /// language is the retry the failure notice offers, and text measured before (its widths
+    /// cached) notes nothing again to ask for them.
+    fn retry_data_cjk_fonts(&mut self) {
+        use rustgis_engine::render::fonts::{ScriptFont, script_font_url};
+        for region in self.fonts_for_data.clone() {
+            let name = format!("script-{:?}", ScriptFont::Cjk(region));
+            let loaded = self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(region)));
+            if loaded || self.fonts_requested.contains(&name) {
+                continue;
+            }
+            self.fonts_requested.push(name);
+            if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(ScriptFont::Cjk(region))) {
+                fetch(url);
+            }
+        }
+    }
+
     /// The interface language whose script is `region`'s, to name a CJK face in a notice.
     fn cjk_language(region: rustgis_engine::render::fonts::CjkRegion) -> i18n::Lang {
         use rustgis_engine::render::fonts::ScriptFont;
@@ -3459,6 +3477,7 @@ impl RustGisApp {
                 }
                 self.ui.language = code.to_ascii_lowercase();
                 self.fonts_failed.clear();
+                self.retry_data_cjk_fonts();
                 self.save_pref("language", &self.ui.language);
                 self.map.invalidate();
             }
@@ -6232,7 +6251,11 @@ impl RustGisApp {
             // interface language, those of the region the map's ideographs were downloaded in
             // (`han_region`), so a face downloaded for kana or Hangul doesn't take them over.
             if self.services.fetch_font.is_some() {
-                rustgis_engine::render::fonts::prefer_downloaded_cjk(Some(self.han_region()));
+                let han = self.han_region();
+                rustgis_engine::render::fonts::prefer_downloaded_cjk(Some(han));
+                // The interface falls back to the extra faces in order: that region's first, so
+                // the ideographs it draws take the same forms, whichever face arrived first.
+                put_first(&mut self.extra_fonts, rustgis_engine::render::fonts::ScriptFont::Cjk(han));
             }
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
@@ -6535,6 +6558,17 @@ fn cjk_downloads(
     wanted
 }
 
+/// Moves the extra face for `region` ahead of the others, the rest kept in order.
+fn put_first(
+    fonts: &mut Vec<(String, std::sync::Arc<egui::FontData>, Option<rustgis_engine::render::fonts::ScriptFont>)>,
+    region: rustgis_engine::render::fonts::ScriptFont,
+) {
+    if let Some(i) = fonts.iter().position(|(_, _, r)| *r == Some(region)) {
+        let face = fonts.remove(i);
+        fonts.insert(0, face);
+    }
+}
+
 /// [`RustGisApp::han_region`] for the interface's script face `current` and the system's preferred
 /// language `tags`.
 fn han_region_for(
@@ -6636,6 +6670,35 @@ mod cjk_download_tests {
         }
         assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
         assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // A face the map's text asked for that failed is asked for again when a language is
+        // picked, the retry its failure notice offers, though nothing notes it again.
+        note_missing_cjk('한');
+        app.ensure_data_cjk_font();
+        let korean = cjk_font_url(CjkRegion::Korean).to_string();
+        assert_eq!(asked.lock().unwrap().last(), Some(&korean));
+        let name = format!("script-{:?}", rustgis_engine::render::fonts::ScriptFont::Cjk(CjkRegion::Korean));
+        app.fonts_requested.retain(|n| *n != name);
+        app.fonts_failed.push(name);
+        app.run("ui.language", serde_json::json!({"code": "en"})).unwrap();
+        assert_eq!(asked.lock().unwrap().iter().filter(|u| **u == korean).count(), 2, "{:?}", asked.lock().unwrap());
+    }
+
+    /// The interface falls back to the face of the map's ideographs first, whichever face
+    /// arrived first, the other faces kept in order.
+    #[test]
+    fn the_ideographs_face_falls_back_first_whichever_arrived_first() {
+        use CjkRegion::{Japanese as Jp, TraditionalChinese as Tc};
+        use rustgis_engine::render::fonts::ScriptFont;
+        let face =
+            |name: &str, region: Option<ScriptFont>| (name.to_string(), std::sync::Arc::new(egui::FontData::from_static(&[])), region);
+        for (first, second) in [(Jp, Tc), (Tc, Jp)] {
+            let mut fonts = vec![face("symbols", None), face("a", Some(ScriptFont::Cjk(first))), face("b", Some(ScriptFont::Cjk(second)))];
+            super::put_first(&mut fonts, ScriptFont::Cjk(Tc));
+            let order: Vec<_> = fonts.iter().map(|(_, _, r)| *r).collect();
+            let other = if first == Tc { second } else { first };
+            assert_eq!(order, vec![Some(ScriptFont::Cjk(Tc)), None, Some(ScriptFont::Cjk(other))]);
+        }
     }
 }
 
