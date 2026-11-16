@@ -432,14 +432,21 @@ fn downloaded_slot(region: CjkRegion) -> &'static OnceLock<(Vec<u8>, u32)> {
 }
 
 /// Hands the renderer a CJK face the web app downloaded (face 0 of `bytes`), for the text it
-/// draws where no font is installed. False, and nothing kept, when the bytes aren't a usable font
-/// or the region has one already.
-pub fn add_downloaded_cjk_font(region: CjkRegion, bytes: Vec<u8>) -> bool {
-    if !valid_font(&bytes, 0) || downloaded_slot(region).set((bytes, 0)).is_err() {
-        return false;
+/// draws where no font is installed. The face is kept for good, and the kept bytes are returned
+/// so the interface can share them instead of holding a second copy of a font several megabytes
+/// in size. The bytes come back unkept when they aren't a usable font or the region has a face
+/// already.
+pub fn add_downloaded_cjk_font(region: CjkRegion, bytes: Vec<u8>) -> Result<&'static [u8], Vec<u8>> {
+    if !valid_font(&bytes, 0) {
+        return Err(bytes);
+    }
+    let mut offered = Some(bytes);
+    let kept = downloaded_slot(region).get_or_init(|| (offered.take().unwrap_or_default(), 0));
+    if let Some(bytes) = offered {
+        return Err(bytes);
     }
     FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    true
+    Ok(&kept.0)
 }
 
 /// The CJK face downloaded for `region`, if one has been handed over.
@@ -607,21 +614,6 @@ pub fn script_font_url(script: ScriptFont) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{bold_thickening, synthetic_bold};
-
-    /// A face the web app downloaded is checked, kept once per region and counted (so text widths
-    /// measured before it arrived aren't reused). The Korean slot is used for Hangul only, which
-    /// the stand-in face doesn't have, so the other tests draw as before.
-    #[test]
-    fn downloaded_cjk_faces_are_checked_kept_once_and_counted() {
-        use super::{CjkRegion, add_downloaded_cjk_font, downloaded_cjk_font, fonts_added};
-        assert!(!add_downloaded_cjk_font(CjkRegion::Korean, b"not a font".to_vec()));
-        assert!(downloaded_cjk_font(CjkRegion::Korean).is_none());
-        let before = fonts_added();
-        assert!(add_downloaded_cjk_font(CjkRegion::Korean, epaint_default_fonts::UBUNTU_LIGHT.to_vec()));
-        assert!(fonts_added() > before);
-        assert!(downloaded_cjk_font(CjkRegion::Korean).is_some_and(|(bytes, index)| bytes.len() > 1000 && *index == 0));
-        assert!(!add_downloaded_cjk_font(CjkRegion::Korean, epaint_default_fonts::HACK_REGULAR.to_vec()), "one face a region");
-    }
 
     /// Bold is thickened by hand only where the bold face is the regular one, with no weight axis
     /// (the built-in face, which the browser has): not where there is a bold file.

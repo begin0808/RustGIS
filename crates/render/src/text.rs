@@ -176,7 +176,11 @@ fn cjk(region: CjkRegion) -> Option<&'static FontRef<'static>> {
         CjkRegion::TraditionalChinese => 3,
     };
     let parse = |(b, i): &'static (Vec<u8>, u32)| FontRef::try_from_slice_and_index(b, *i).ok();
-    let installed = FACES.get(slot)?.get_or_init(|| crate::fonts::cjk_font(region).and_then(parse)).as_ref();
+    // A test can run in a process of its own with no installed face, as in the browser, so the
+    // downloaded faces are tested alike whatever fonts the machine has.
+    let none_installed = cfg!(test) && std::env::var_os("RUSTGIS_TEST_NO_INSTALLED_CJK").is_some();
+    let installed =
+        if none_installed { None } else { FACES.get(slot)?.get_or_init(|| crate::fonts::cjk_font(region).and_then(parse)).as_ref() };
     installed.or_else(|| {
         let downloaded = crate::fonts::downloaded_cjk_font(region)?;
         DOWNLOADED.get(slot)?.get_or_init(|| parse(downloaded)).as_ref()
@@ -185,14 +189,15 @@ fn cjk(region: CjkRegion) -> Option<&'static FontRef<'static>> {
 
 /// The CJK faces to try for `c`, the region whose glyph style suits it first: Hangul looks for a
 /// Korean face, kana for a Japanese one, everything else (Han ideographs) for Simplified Chinese.
-/// Traditional Chinese comes after Simplified: where Simplified is installed nothing changes, and
-/// in the browser it is the face a Traditional Chinese interface downloads.
+/// Traditional Chinese comes last: on the desktop it is tried only for a character no other face
+/// has, so what draws each character there doesn't change, and in the browser it is the face a
+/// Traditional Chinese interface downloads.
 fn cjk_order(c: char) -> [CjkRegion; 4] {
     use CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc, TraditionalChinese as Tc};
     match c {
-        '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => [Kr, Sc, Tc, Jp],
-        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => [Jp, Sc, Tc, Kr],
-        _ => [Sc, Tc, Jp, Kr],
+        '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => [Kr, Sc, Jp, Tc],
+        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => [Jp, Sc, Kr, Tc],
+        _ => [Sc, Jp, Kr, Tc],
     }
 }
 
@@ -1274,22 +1279,47 @@ mod coverage_tests {
         assert!(pm.pixels().iter().any(|p| p.alpha() > 0), "the fallback glyph was not drawn");
     }
 
-    /// In the browser no CJK font is installed: the face the web app downloads draws what the
-    /// label font lacks, in exports and the layout view, and widths measured before it arrived are
-    /// measured again. egui's icon face stands in for a downloaded one: it has only a few
-    /// private-use characters, so the other tests draw as before.
+    /// Traditional Chinese is the last face tried for every script, so on the desktop a character
+    /// another face has (a kanji only the Japanese face has, say) is drawn by that face as before.
+    #[test]
+    fn traditional_chinese_is_the_last_cjk_face_tried() {
+        use crate::fonts::CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc, TraditionalChinese as Tc};
+        assert_eq!(super::cjk_order('\u{6F22}'), [Sc, Jp, Kr, Tc]);
+        assert_eq!(super::cjk_order('\u{304B}'), [Jp, Sc, Kr, Tc]);
+        assert_eq!(super::cjk_order('\u{D55C}'), [Kr, Sc, Jp, Tc]);
+    }
+
+    /// In the browser no CJK font is installed: the face the web app downloads is checked, kept
+    /// once a region and handed back to share, and draws what the label font lacks, in exports and
+    /// the layout view; widths measured before it arrived are measured again. The test runs in a
+    /// process of its own with no installed CJK face and the built-in label font, so it checks the
+    /// same on every machine and its faces reach no other test. egui's icon face stands in for a
+    /// downloaded one.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn draws_with_a_downloaded_face_where_none_is_installed() {
-        use crate::fonts::{CjkRegion, add_downloaded_cjk_font, cjk_font};
-        let icon = "\u{E618}";
-        let installed =
-            [CjkRegion::SimplifiedChinese, CjkRegion::TraditionalChinese, CjkRegion::Japanese].into_iter().any(|r| cjk_font(r).is_some());
-        // An installed face is tried first; a label font with the character needs no other.
-        if installed || super::covers(icon, false) {
+        if std::env::var_os("RUSTGIS_TEST_NO_INSTALLED_CJK").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "text::coverage_tests::draws_with_a_downloaded_face_where_none_is_installed", "--nocapture"])
+                .env("RUSTGIS_TEST_NO_INSTALLED_CJK", "1")
+                .env("RUSTGIS_BUILTIN_FONTS", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "the test didn't run in the child process");
             return;
         }
-        let before = super::measure(icon, 10.0, false);
-        assert!(add_downloaded_cjk_font(CjkRegion::Japanese, epaint_default_fonts::EGUI_ICONS.to_vec()));
+        use crate::fonts::{CjkRegion, add_downloaded_cjk_font, downloaded_cjk_font, fonts_added};
+        use epaint_default_fonts::{EGUI_ICONS, HACK_REGULAR};
+        let icon = "\u{E618}";
+        assert!(!super::covers(icon, false), "the built-in label font has no icons");
+        let (before, added) = (super::measure(icon, 10.0, false), fonts_added());
+        assert!(add_downloaded_cjk_font(CjkRegion::Japanese, b"not a font".to_vec()).is_err());
+        assert!(downloaded_cjk_font(CjkRegion::Japanese).is_none());
+        assert_eq!(add_downloaded_cjk_font(CjkRegion::Japanese, EGUI_ICONS.to_vec()), Ok(EGUI_ICONS), "the kept bytes are shared");
+        assert_eq!(fonts_added(), added + 1);
+        assert_eq!(add_downloaded_cjk_font(CjkRegion::Japanese, HACK_REGULAR.to_vec()), Err(HACK_REGULAR.to_vec()), "one face a region");
+        assert_eq!(fonts_added(), added + 1);
         assert!(super::covers(icon, false));
         assert!(super::measure(icon, 10.0, false) > before, "a width cached before the face arrived was kept");
         let mut pm = tiny_skia::Pixmap::new(80, 40).unwrap();
