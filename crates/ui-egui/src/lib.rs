@@ -1928,6 +1928,11 @@ impl RustGisApp {
             if let (Some(fetch), Some(url)) = (&self.services.fetch_font, script_font_url(ScriptFont::Cjk(region))) {
                 fetch(url);
             }
+            let msg = i18n::fmt(
+                "Downloading the font for the {language} text on the map. Images exported before it arrives leave that text out.",
+                &[("language", Self::cjk_language(region).english())],
+            );
+            self.session.notify(msg, false);
         }
     }
 
@@ -6680,8 +6685,12 @@ mod cjk_download_tests {
         let name = format!("script-{:?}", rustgis_engine::render::fonts::ScriptFont::Cjk(CjkRegion::Korean));
         app.fonts_requested.retain(|n| *n != name);
         app.fonts_failed.push(name);
+        let mark = app.session.notice_mark();
         app.run("ui.language", serde_json::json!({"code": "en"})).unwrap();
-        assert_eq!(asked.lock().unwrap().iter().filter(|u| **u == korean).count(), 2, "{:?}", asked.lock().unwrap());
+        let urls = asked.lock().unwrap().clone();
+        assert_eq!(urls.iter().filter(|u| **u == korean).count(), 2, "{urls:?}");
+        let retrying = app.session.notices_since(mark).iter().filter(|n| n.text.contains("Downloading the font for the Korean")).count();
+        assert_eq!(retrying, 1, "the retry is said: {:?}", app.session.notices_since(mark));
     }
 
     /// The interface falls back to the face of the map's ideographs first, whichever face
