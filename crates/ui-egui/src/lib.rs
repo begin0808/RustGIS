@@ -6048,6 +6048,9 @@ impl RustGisApp {
             theme::install_fonts(ctx, &self.extra_fonts, self.installed_region);
             self.fonts_pending = true;
             self.map.invalidate();
+            // A page drawn before a downloaded CJK face reached the renderer left its CJK text
+            // out: draw it again with the face.
+            self.layout.redraw();
         }
         // The label fonts the last frame's labels asked for (after the interface fonts, which
         // would replace them). Not in a frame that set the interface fonts: those take effect on
