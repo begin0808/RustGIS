@@ -444,9 +444,11 @@ impl CjkScript {
     /// The CJK script of `c`, `None` for any other character.
     pub fn of(c: char) -> Option<CjkScript> {
         match c {
-            '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => {
-                Some(CjkScript::Hangul)
-            }
+            '\u{1100}'..='\u{11FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7FF}'
+            | '\u{FFA0}'..='\u{FFDC}' => Some(CjkScript::Hangul),
             '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => Some(CjkScript::Kana),
             '\u{2E80}'..='\u{2FDF}'
             | '\u{3000}'..='\u{303F}'
@@ -483,7 +485,16 @@ pub fn note_missing_cjk(c: char) {
 /// The CJK scripts the renderer has met with no face since the last call, cleared: the text a
 /// map's labels, a layout or an export needed, whatever the interface language.
 pub fn take_missing_cjk() -> Vec<CjkScript> {
-    let bits = MISSING_CJK.swap(0, std::sync::atomic::Ordering::Relaxed);
+    scripts(MISSING_CJK.swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The CJK scripts noted since the last [`take_missing_cjk`], left noted: the interface asks for
+/// another frame when one is new to it, as the next frame takes them.
+pub fn peek_missing_cjk() -> Vec<CjkScript> {
+    scripts(MISSING_CJK.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn scripts(bits: u8) -> Vec<CjkScript> {
     [CjkScript::Han, CjkScript::Kana, CjkScript::Hangul].into_iter().filter(|s| bits & s.bit() != 0).collect()
 }
 
@@ -723,6 +734,7 @@ mod tests {
             ('ｶ', Some(Kana)),
             ('한', Some(Hangul)),
             ('ㄱ', Some(Hangul)),
+            ('\u{FFA1}', Some(Hangul)),
             ('A', None),
             ('é', None),
             ('Ж', None),

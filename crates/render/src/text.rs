@@ -205,10 +205,11 @@ fn parse_cjk((bytes, index): &'static (Vec<u8>, u32)) -> Option<FontRef<'static>
 /// has, so what draws each character there doesn't change, and in the browser it is the face a
 /// Traditional Chinese interface downloads.
 fn cjk_order(c: char) -> [CjkRegion; 4] {
+    use crate::fonts::CjkScript;
     use CjkRegion::{Japanese as Jp, Korean as Kr, SimplifiedChinese as Sc, TraditionalChinese as Tc};
-    match c {
-        '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' => [Kr, Sc, Jp, Tc],
-        '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => [Jp, Sc, Kr, Tc],
+    match CjkScript::of(c) {
+        Some(CjkScript::Hangul) => [Kr, Sc, Jp, Tc],
+        Some(CjkScript::Kana) => [Jp, Sc, Kr, Tc],
         _ => [Sc, Jp, Kr, Tc],
     }
 }
@@ -217,8 +218,9 @@ fn cjk_order(c: char) -> [CjkRegion; 4] {
 /// serif text falls back to: an arrow or a script the serif lacks), else the first installed CJK
 /// font that does. `None` when nothing covers it, so no missing-glyph box is drawn.
 ///
-/// Ideographs (every character but kana and Hangul) try the downloaded face the web app prefers
-/// first ([`crate::fonts::prefer_downloaded_cjk`]), so they take its interface's regional forms.
+/// Every character the label font and `sans` lack but kana and Hangul (ideographs above all) tries
+/// the downloaded face the web app prefers first ([`crate::fonts::prefer_downloaded_cjk`]), so
+/// ideographs take its interface's regional forms.
 fn glyph(c: char, f: &'static FontRef<'static>, sans: Option<&'static FontRef<'static>>) -> Option<(&'static FontRef<'static>, GlyphId)> {
     use crate::fonts::CjkScript;
     let id = f.glyph_id(c);
@@ -231,8 +233,8 @@ fn glyph(c: char, f: &'static FontRef<'static>, sans: Option<&'static FontRef<'s
             return Some((s, id));
         }
     }
-    let ideograph = !matches!(CjkScript::of(c), Some(CjkScript::Kana | CjkScript::Hangul));
-    let preferred = ideograph.then(crate::fonts::preferred_downloaded_cjk).flatten().and_then(downloaded_cjk);
+    let not_kana_or_hangul = !matches!(CjkScript::of(c), Some(CjkScript::Kana | CjkScript::Hangul));
+    let preferred = not_kana_or_hangul.then(crate::fonts::preferred_downloaded_cjk).flatten().and_then(downloaded_cjk);
     preferred.into_iter().chain(cjk_order(c).into_iter().filter_map(cjk)).find_map(|f| {
         let id = f.glyph_id(c);
         (id.0 != 0).then_some((f, id))
@@ -260,8 +262,11 @@ fn shape(
     let mut prev: Option<(&'static FontRef<'static>, GlyphId)> = None;
     for ch in text.chars().take(500) {
         let Some((f, id)) = glyph(ch, face, sans) else {
-            // Left out. A CJK character is noted, so the web app downloads a face for it.
-            crate::fonts::note_missing_cjk(ch);
+            // Left out. A CJK character is noted, so the web app downloads a face for it; an
+            // invisible one (the ideographic space) draws nothing and needs none.
+            if !invisible(ch) {
+                crate::fonts::note_missing_cjk(ch);
+            }
             continue;
         };
         let sf = f.as_scaled(em(f, px));
@@ -1389,6 +1394,8 @@ mod coverage_tests {
         let _ = take_missing_cjk();
         super::measure("Taipei 101", 10.0, false);
         assert_eq!(take_missing_cjk(), vec![], "no CJK text, nothing noted");
+        super::measure("Taipei\u{3000}101", 10.0, false);
+        assert_eq!(take_missing_cjk(), vec![], "the ideographic space draws nothing and needs no face");
         super::measure("臺北 たいぺい 타이베이", 10.0, false);
         assert_eq!(take_missing_cjk(), vec![CjkScript::Han, CjkScript::Kana, CjkScript::Hangul]);
         assert_eq!(take_missing_cjk(), vec![], "taken once");
