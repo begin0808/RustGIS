@@ -1301,6 +1301,8 @@ pub struct RustGisApp {
     fonts_for_data: Vec<rustgis_engine::render::fonts::CjkRegion>,
     /// CJK scripts `ensure_data_cjk_font` has dealt with: a face asked for, or none to be had said.
     cjk_scripts_handled: Vec<rustgis_engine::render::fonts::CjkScript>,
+    /// CJK scripts whose characters the downloaded face lacks, said once each.
+    cjk_lacking_said: Vec<rustgis_engine::render::fonts::CjkScript>,
     /// Fonts were installed this frame: `set_fonts` only takes effect on the next one.
     fonts_pending: bool,
     /// Whether the installed font families were indexed by a frame (see `families::warm_up`).
@@ -1546,6 +1548,7 @@ impl RustGisApp {
             fonts_failed: Vec::new(),
             fonts_for_data: Vec::new(),
             cjk_scripts_handled: Vec::new(),
+            cjk_lacking_said: Vec::new(),
             fonts_pending: false,
             label_fonts_indexed: false,
             shown_lang: i18n::Lang::EN,
@@ -1875,6 +1878,20 @@ impl RustGisApp {
                 || self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(r)))
         };
         let wanted = cjk_downloads(&missing, han, asked);
+        // Characters the face for their script, already loaded, still lacks (rare ideographs past
+        // its coverage, say) are left out: said once a script.
+        for script in &missing {
+            let region = cjk_downloads(&[*script], han, |_| false).first().copied().unwrap_or(han);
+            let loaded = self.extra_fonts.iter().any(|(_, _, x)| *x == Some(ScriptFont::Cjk(region)));
+            if loaded && !self.cjk_lacking_said.contains(script) {
+                self.cjk_lacking_said.push(*script);
+                let msg = i18n::fmt(
+                    "Some characters of the {language} text on the map aren't in its downloaded font, so they are left out.",
+                    &[("language", Self::cjk_language(region).english())],
+                );
+                self.session.notify(msg, false);
+            }
+        }
         for script in missing {
             if !self.cjk_scripts_handled.contains(&script) {
                 self.cjk_scripts_handled.push(script);
@@ -6607,6 +6624,18 @@ mod cjk_download_tests {
         }
         assert_eq!(*asked.lock().unwrap(), vec![cjk_font_url(CjkRegion::Japanese).to_string()]);
         assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
+
+        // Its face loaded, characters it still lacks are said once, and the face isn't asked for
+        // again.
+        let face = std::sync::Arc::new(egui::FontData::from_static(&[]));
+        app.extra_fonts.push(("web-test".into(), face, Some(rustgis_engine::render::fonts::ScriptFont::Cjk(CjkRegion::Japanese))));
+        let mark = app.session.notice_mark();
+        for _ in 0..2 {
+            note_missing_cjk('か');
+            app.ensure_data_cjk_font();
+        }
+        assert_eq!(said(&app, mark), 1, "{:?}", app.session.notices_since(mark));
+        assert_eq!(asked.lock().unwrap().len(), 1);
     }
 }
 
